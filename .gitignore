@@ -1,0 +1,20 @@
+# Segreti e configurazione locale
+.env
+.env.*
+!.env.example
+
+# Materiali e output
+*.pdf
+*.png
+*.jpg
+*.jpeg
+/Input
+/Output
+
+# Ambiente Python e cache
+.venv/
+__pycache__/
+**/cache/
+
+# logs
+*.log
