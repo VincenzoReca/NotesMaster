@@ -3,18 +3,46 @@
 .env.*
 !.env.example
 
-# Materiali e output
+# Local course material, generated output, and preserved test archives
+/input/
+/output/
+/_archive/
+/Input/
+/Output/
+/tests/fixtures/**/output/
 *.pdf
 *.png
 *.jpg
 *.jpeg
-/Input
-/Output
+*.webp
+*.mp3
+*.wav
+*.m4a
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.webm
+*.docx
+/Introduction.docx
 
 # Ambiente Python e cache
 .venv/
 __pycache__/
 **/cache/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
 # logs
 *.log
+
+# Local model/profile overrides and generated reports
+model_profiles.local.json
+pipeline_report.json
+pipeline_batch_report.json
+merge_state.json
+merge_checkpoint.json
+extraction_manifest.json
+materia_state.json

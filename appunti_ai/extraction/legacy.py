@@ -1,5 +1,6 @@
 
 from pathlib import Path
+import argparse
 import json
 import re
 
@@ -9,14 +10,11 @@ from docx.oxml.ns import qn
 from PIL import Image
 from io import BytesIO
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[2]
 INPUT = ROOT / "input"
 OUTPUT = ROOT / "output"
 EXTRACTED = OUTPUT / "extracted"
 IMAGES = OUTPUT / "images"
-
-for folder in (EXTRACTED, IMAGES):
-    folder.mkdir(parents=True, exist_ok=True)
 
 
 def safe_name(name):
@@ -261,6 +259,60 @@ def extract_text_file(path):
     }
 
 def main():
+    for folder in (EXTRACTED, IMAGES):
+        folder.mkdir(parents=True, exist_ok=True)
+    parser = argparse.ArgumentParser(
+        description="Estrae fonti nel formato legacy oppure in uno scope materia/sezione esplicito."
+    )
+    parser.add_argument("--project-root", type=Path, default=ROOT)
+    parser.add_argument("--subject", help="Materia canonica da elaborare.")
+    parser.add_argument("--section", help="Sezione canonica da elaborare.")
+    parser.add_argument(
+        "--shared",
+        action="store_true",
+        help="Elabora soltanto input/<Materia>/_condivise/.",
+    )
+    args = parser.parse_args()
+
+    # La modalità legacy resta invariata quando non vengono forniti argomenti
+    # di scope. La nuova modalità non elabora mai tutte le sezioni insieme.
+    if args.subject or args.section or args.shared:
+        if not args.subject:
+            parser.error("--subject è obbligatorio con --section o --shared.")
+        if args.shared and args.section:
+            parser.error("Usare --section oppure --shared, non entrambi.")
+        if not args.shared and not args.section:
+            parser.error("Specificare --section oppure --shared.")
+
+        from appunti_ai.contracts.paths import PathContractError, discover_subject
+        from appunti_ai.extraction.scoped import ExtractionError, build_scope, extract_scope
+
+        try:
+            subject = discover_subject(args.project_root, args.subject)
+            scope = build_scope(subject, args.section, args.shared)
+            manifest = extract_scope(scope)
+        except (PathContractError, ExtractionError) as exc:
+            raise SystemExit(f"ERRORE: {exc}") from exc
+
+        sources = manifest["sources"]
+        assert isinstance(sources, dict)
+        completed = sum(
+            1 for record in sources.values()
+            if isinstance(record, dict) and record.get("status") == "completed"
+        )
+        failed = sum(
+            1 for record in sources.values()
+            if isinstance(record, dict) and record.get("status") == "failed"
+        )
+        unsupported = sum(
+            1 for record in sources.values()
+            if isinstance(record, dict) and record.get("status") == "unsupported"
+        )
+        print(f"Scope estratto: {scope.source_root}")
+        print(f"Completate: {completed} | fallite: {failed} | non supportate: {unsupported}")
+        print(f"Manifest: {scope.manifest_path}")
+        return
+
     if not INPUT.exists():
         raise SystemExit(f"Cartella input mancante: {INPUT}")
 

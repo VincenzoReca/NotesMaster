@@ -15,9 +15,10 @@ from typing import Any
 from urllib.request import Request, urlopen
 
 import ollama
+from appunti_ai.modeling.profiles import DEFAULT_PROFILE_FILE, ProfileError, load_profile
 
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[2]
 EXTRACTED = ROOT / "output" / "extracted"
 DIAGNOSTICS = ROOT / "output" / "diagnostics"
 MODEL = "qwen3-vl:4b"
@@ -181,9 +182,17 @@ def main() -> None:
         default="both",
         help="Caso diagnostico da eseguire (predefinito: entrambi).",
     )
-    parser.add_argument("--model", default=MODEL, help="Tag Ollama da testare.")
+    parser.add_argument("--model", default=None, help="Override del tag Ollama nel profilo.")
+    parser.add_argument("--model-profile", help="Profilo modello da usare.")
+    parser.add_argument("--profiles", type=Path, default=DEFAULT_PROFILE_FILE)
     args = parser.parse_args()
-    MODEL = args.model
+    try:
+        profile = load_profile(args.model_profile, args.profiles)
+        if args.case in {"image", "both"}:
+            profile.require({"vision"})
+        MODEL = args.model or profile.model
+    except ProfileError as exc:
+        raise SystemExit(f"Profilo modello non valido: {exc}") from exc
     DIAGNOSTICS.mkdir(parents=True, exist_ok=True)
     markdown = (EXTRACTED / "week-01-course-intro-and-toolchain.md").read_text(
         encoding="utf-8"

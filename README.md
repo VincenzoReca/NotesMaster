@@ -1,5 +1,7 @@
 # AppuntiAI
 
+For a practical setup and usage walkthrough, see [USER_GUIDE.md](USER_GUIDE.md).
+
 AppuntiAI is a local-first pipeline intended to transform university course materials into detailed, coherent, source-faithful study notes. It combines lecture transcripts, professor-provided slides, personal notes, and relevant visual material while keeping the provenance of information traceable.
 
 > **Status and accuracy:** This document describes the agreed project goals and target architecture, not a claim that every feature is implemented. Initial extraction and generation scripts have existed, and a defect was previously observed in which some draft files contained metadata but little or no generated analysis. The current local code, installed model, and runtime configuration must be inspected before drawing conclusions about their present state.
@@ -10,7 +12,7 @@ The project is intended to:
 
 - Run locally on Windows 11, using Python and Ollama, without Docker.
 - Prefer free, locally executable software and models.
-- Support PDF, DOCX, Markdown, TXT, and relevant images, subject to verified extractor capabilities.
+- Support PDF, DOCX, Markdown, TXT, relevant images, audio, and video, subject to verified extractor capabilities.
 - Handle large collections of material, with an earlier target of roughly 100–300 pages in total, by processing bounded units rather than sending everything to the model at once.
 - Produce detailed, university-level notes rather than superficial summaries.
 - Preserve definitions, explanations, reasoning, examples, formulas, code, diagrams, exceptions, qualifications, and other meaningful technical details.
@@ -32,7 +34,7 @@ The agreed hierarchy is:
 2. **Professor's slides:** authoritative complementary source for official structure, terminology, definitions, formulas, diagrams, and figures.
 3. **Personal notes:** supplementary material that must be considered, but is not authoritative when it conflicts with professor-provided sources.
 
-When personal notes conflict with the professor's sources, do not present the conflicting personal claim as established course content. Preserve useful non-conflicting additions when appropriate. Record relevant conflicts or questionable material in a separate audit when useful; do not silently let personal notes override the professor.
+When personal notes conflict with the professor's sources, do not present the conflicting personal claim as established course content. Preserve useful non-conflicting additions when appropriate. Record the conflict in a separate audit and, when material and supported by the supplied texts, add a concise English `> **Source clarification.** ...` note to the final study text; do not silently let personal notes override the professor.
 
 When professor-provided sources conflict with each other, do not arbitrarily choose one, erase the disagreement, or invent a reconciliation. Preserve the distinct claims, identify their sources and page references where available, and flag the conflict for review.
 
@@ -42,18 +44,59 @@ The goal is not to summarize sources independently and concatenate their summari
 
 ## 3. Intended architecture
 
-Python controls deterministic workflow logic: directory discovery, path safety, source isolation, extraction orchestration, task creation, validation, checkpoints, retries, logging, dependency tracking, and deterministic assembly. The model performs bounded language tasks, such as explaining source material, describing relevant visual content, and consolidating a single section.
+Python controls deterministic workflow logic: directory discovery, path safety, source isolation, extraction orchestration, task creation, validation, checkpoints, retries, logging, dependency tracking, and deterministic assembly. The model performs bounded language tasks, such as explaining source material, describing relevant visual content, transcribing approved media, and consolidating a single section.
 
-Ollama provides the local model runtime. The most recently reported model is `qwen3-vl:4b-instruct`; earlier work also referred to `qwen3-vl:4b` and `qwen3-vl:2b`. Verify the model actually installed with `ollama list` and inspect the real configuration before relying on any model name or parameter.
+Ollama provides the initial local model runtime. The most recently reported model is `qwen3-vl:4b-instruct`; earlier work also referred to `qwen3-vl:4b` and `qwen3-vl:2b`. The target design is not tied to Ollama: every model-backed component will use an application-owned provider adapter selected by a named model profile. This allows a local runtime, an explicitly approved remote API, or another compatible backend to change without spreading provider-specific code through the pipeline.
+
+The proposed ergonomic selection is a named profile, for example `--model-profile locale_qwen`. A profile resolves to an adapter kind, model identifier, runtime/endpoint reference, capabilities, and non-secret defaults. The pipeline checks capabilities before it submits a task; it must never silently fall back from a local model to a remote API. The profile-file format, supported adapter set, and remote-provider approval mechanism remain open implementation decisions.
+
+### Source-code layout
+
+The repository keeps command-line entry points at the root for compatibility, while reusable business logic lives in the `appunti_ai/` package:
+
+```text
+appunti_ai/
+├── contracts/      # Paths, subject/section discovery, configuration contracts
+├── extraction/     # Source extraction and shared-source archive primitives
+├── generation/     # Model-backed draft generation
+├── consolidation/  # Section-level consolidation
+├── diagnostics/    # Local Ollama/model diagnostics
+└── modeling/       # Profiles, capability checks, and provider adapters
+```
+
+The `scripts/` directory contains CLI entry points, while reusable business logic belongs in `appunti_ai/`. `orchestrate.py` is the primary user-facing launcher. `model_profiles.json` contains non-secret profile definitions; credentials remain outside version control. Tests remain under `tests/` and must not depend on real course material or an active model runtime.
+
+The current deterministic preparation command is:
+
+```powershell
+python scripts/run_pipeline.py --subject Reti
+```
+
+To prepare only one section, use `--section 02_NomeSezione`. The command writes a separate `pipeline_report.json` under the subject output directory. Each extraction scope also writes `audit/extraction_audit.json` with completed, failed, unsupported, and unsupported-media sources. Generation writes `audit/generation_audit.json`; section consolidation writes `audit/merge_audit.json` separately from `merge_state.json` and `appunti_finali.md`. `--assemble` requests deterministic assembly, which remains blocked unless every required section has a valid `appunti_finali.md`. Model generation and section consolidation can also receive explicit `--extracted-dir` and `--draft-dir` paths; their complete orchestration is still being implemented.
+
+For an isolated section, use for example:
+
+```powershell
+python scripts/generate_notes.py --extracted-dir output/Reti/01_Sezione/extracted --draft-dir output/Reti/01_Sezione/draft
+python scripts/merge_notes.py --extracted-dir output/Reti/01_Sezione/extracted --draft-dir output/Reti/01_Sezione/draft --output-root output/Reti/01_Sezione
+```
+
+Before a model-backed run, validate the complete plan without contacting any provider:
+
+```powershell
+python scripts/run_pipeline.py --subject Reti --generate --consolidate --assemble --dry-run
+```
+
+After reviewing the dry-run, the same command without `--dry-run` executes the requested model-backed phases. `--generate`, `--consolidate`, and `--assemble` are independent opt-in phases; omitting them performs only deterministic preparation.
 
 ### Intended processing stages
 
 1. Discover subjects and sections from the agreed directory structure.
 2. Validate configuration, paths, file placement, and deterministic section order.
-3. Extract text, page information, tables, and relevant images from section-specific sources.
+3. Extract text, page information, tables, relevant images, and, when supported, bounded audio/video-derived artifacts from section-specific sources.
 4. Extract and index optional shared sources once per subject, preserving page-level traceability.
 5. Retrieve only relevant shared-source passages for each section; do not repeatedly analyse the entire shared document.
-6. Generate bounded intermediate analyses from the correct sources.
+6. Resolve an explicit model profile, preflight required capabilities, and generate bounded intermediate analyses from the correct sources.
 7. Validate outputs and persist task state, dependency information, and diagnostics.
 8. Consolidate each section into its own study-ready Markdown file.
 9. Keep audits, source diagnostics, conflicts, and coverage limitations separate from the study text.
@@ -134,7 +177,7 @@ The style reference agreed for this project is `network.pdf`, previously describ
 
 Final notes should have clear chapters and subchapters, connected explanatory prose, definitions, motivations, examples, formulas, exceptions, and important technical details. Use lists when they improve understanding, not as a substitute for explanation. Do not impose artificial headings where the source does not justify them.
 
-Do not put model reasoning, prompt instructions, chunk metadata, internal processing commentary, or placeholders such as `[DA VERIFICARE]` into the study text. Put conflicts, gaps, and coverage limitations in `audit/` or separate metadata.
+Do not put model reasoning, prompt instructions, chunk metadata, internal processing commentary, or placeholders such as `[DA VERIFICARE]` into the study text. Put conflicts, gaps, and coverage limitations in `audit/` or separate metadata, except for the concise source clarification note explicitly allowed for material, source-supported conflicts.
 
 ### `appunti_materia.md`
 
@@ -149,6 +192,8 @@ Keep source originals, extracted text, rendered pages/images, model drafts, stat
 ## 6. Extraction and visual content
 
 Extraction is distinct from semantic analysis. PDF and DOCX extraction may fail to recover all text, tables, layout, or visual information. Scanned PDFs may require OCR, but OCR has not been selected as a dependency and must not be assumed installed. A page with no extracted text may be a scan, diagram, or image; do not automatically treat it as blank.
+
+Audio and video are first-class source modalities. Their original files remain authoritative evidence: a transcript, audio segment, or sampled frame is a derived artifact that must retain the media hash, source identity, and time-range provenance. Video frame selection and media transcription must be bounded; the pipeline must not submit an entire long recording or every frame in one request. Unsupported or failed media processing produces diagnostics and audit records, not a false claim of coverage. The authority of a source depends on who produced it, never on whether it is text, audio, or video.
 
 Preserve original page numbers, table content, relevant images, and source references wherever technically possible. Resolve relative image paths correctly and verify that referenced image files exist before passing them to a model. Important visual information should remain traceable to the original page and should be flagged for review when extraction or visual interpretation is uncertain.
 
@@ -182,14 +227,17 @@ The pipeline should:
 - Record useful diagnostics such as model/configuration, duration, termination reason, attempts, and token counts when available. Clearly distinguish estimates from exact counts.
 - Use explicit budgets for input size, output size, timeouts, retries, retrieval expansion, and merge depth.
 - Ensure every loop has a guaranteed exit and measurable progress.
+- Resolve model access through a named profile and capability-aware adapter, rather than direct SDK calls in pipeline components.
+- Record non-secret profile/backend/model identity and required capabilities in task diagnostics and invalidation fingerprints.
+- Require explicit opt-in before transferring any source material to a remote provider; no automatic local-to-cloud fallback is allowed.
 
 Numeric limits and retry counts have not been finalised. Choose them after inspecting the actual runtime and code; ask for confirmation when the trade-off materially affects quality, memory, time, or dependencies.
 
 ## 9. Security and Git
 
-Keep API keys, tokens, passwords, local `.env` files, virtual environments, caches, generated outputs, sensitive logs, and private course material out of version control unless there is a deliberate, appropriate reason to publish them. Course slides, transcripts, personal notes, and generated notes may be copyrighted or otherwise unsuitable for a public repository.
+Keep API keys, tokens, passwords, local `.env` files, virtual environments, caches, generated outputs, sensitive logs, and private course material out of version control unless there is a deliberate, appropriate reason to publish them. Course slides, recordings, transcripts, personal notes, and generated notes may be copyrighted or otherwise unsuitable for a public repository.
 
-`.gitignore` does not remove files already tracked by Git and does not erase secrets from repository history. Review tracked files before publishing. A `.env.example` should contain variable names and placeholder/empty values only, never real secrets. Local Ollama generally does not require a third-party API key, but verify the actual integration before assuming no credentials are used.
+`.gitignore` does not remove files already tracked by Git and does not erase secrets from repository history. Review tracked files before publishing. A `.env.example` should contain variable names and placeholder/empty values only, never real secrets. Local Ollama generally does not require a third-party API key, but verify the actual integration before assuming no credentials are used. Remote provider credentials and raw HTTP authorization data must never enter `materia.json`, state, manifests, prompts, logs, or audit reports.
 
 Be careful with broad ignore patterns such as `*.pdf`: they also ignore a style reference such as `network.pdf`. Decide deliberately whether that file is appropriate to track; do not publish it merely to make the example work.
 
@@ -205,7 +253,7 @@ Recommended implementation order:
 2. Define and test subject/section discovery, path safety, ordering, and handling of misplaced files.
 3. Implement isolated extraction for section-specific and optional shared sources.
 4. Design the shared-source archive and choose retrieval only after evaluating trade-offs.
-5. Implement bounded generation, output validation, atomic checkpoints, and finite retries.
+5. Implement the provider adapter boundary, explicit model-profile selection, capability preflight, and remote-transfer safeguards; then implement bounded generation, output validation, atomic checkpoints, and finite retries.
 6. Consolidate each section independently and keep audit information separate.
 7. Implement deterministic subject assembly without model rewriting.
 8. Add `run_pipeline.py` only after component behaviour and tests are reliable.
@@ -217,7 +265,7 @@ Make small, reversible changes and verify each phase before proceeding. n8n is a
 
 Agreed: local-first processing; no Docker; source hierarchy; no invented facts; section and subject isolation; optional shared sources; per-section final Markdown; deterministic subject assembly; finite retries and loops; checkpoint/resumption; separate audits; inspect the real code before modifying it; delay n8n until Python is reliable.
 
-Still open and not to be guessed: shared-source indexing strategy; whether/how to add OCR; final numeric budgets and timeouts; final state schema and migration strategy; behaviour for missing/duplicate numeric section prefixes; treatment of headings and internal references during assembly; whether partial assembly is allowed; measurable coverage criteria and required manual review; migration of existing outputs; DOCX export details.
+Still open and not to be guessed: shared-source indexing strategy; whether/how to add OCR; audio/video decoder, transcription, diarization, and frame-sampling strategy; initial provider adapters; model-profile file format and scope; remote-provider approval path; final numeric budgets and timeouts; final state schema and migration strategy; behaviour for missing/duplicate numeric section prefixes; treatment of headings and internal references during assembly; whether partial assembly is allowed; measurable coverage criteria and required manual review; migration of existing outputs; DOCX export details.
 
 ## 12. Definition of done
 
@@ -231,6 +279,9 @@ The pipeline should not be called reliable until:
 - Audit, logs, drafts, and state are separate from the study text.
 - All loops and retries have finite limits.
 - Empty/truncated outputs are not marked complete.
+- Audio/video processing, when enabled, preserves temporal provenance; unsupported media is reported rather than silently skipped.
+- Model/profile changes are traceable and do not require edits across pipeline components.
+- No source material is transferred to a remote provider without explicit approval.
 - A second run reuses valid results.
 - Changes invalidate only relevant dependencies.
 - Subject assembly is deterministic and does not call the model.
