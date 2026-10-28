@@ -85,11 +85,18 @@ def main():
             for section_name in selected:
                 progress(f"[{args.subject}] Section {section_name}: starting model phases", quiet=args.json_only)
                 section_output = subject_output / section_name
+                profile_dir = (args.model_profile or "local_qwen").replace("..", "_").replace("/", "_").replace("\\", "_")
+                draft_output = section_output / "draft" / profile_dir
+                # Preserve resumability of pre-profile legacy local drafts;
+                # every new provider/profile gets its own isolated directory.
+                legacy_draft = section_output / "draft"
+                if profile_dir == "local_qwen" and not draft_output.exists() and (legacy_draft / "state.json").is_file():
+                    draft_output = legacy_draft
                 commands = []
                 if args.generate:
-                    commands.append([sys.executable, str(PROJECT_ROOT / "scripts" / "generate_notes.py"), "--extracted-dir", str(section_output / "extracted"), "--draft-dir", str(section_output / "draft")])
+                    commands.append([sys.executable, str(PROJECT_ROOT / "scripts" / "generate_notes.py"), "--extracted-dir", str(section_output / "extracted"), "--draft-dir", str(draft_output)])
                 if args.consolidate:
-                    commands.append([sys.executable, str(PROJECT_ROOT / "scripts" / "merge_notes.py"), "--extracted-dir", str(section_output / "extracted"), "--draft-dir", str(section_output / "draft"), "--output-root", str(section_output)])
+                    commands.append([sys.executable, str(PROJECT_ROOT / "scripts" / "merge_notes.py"), "--extracted-dir", str(section_output / "extracted"), "--draft-dir", str(draft_output), "--output-root", str(section_output), "--cache-dir", str(section_output / "audit" / "merge_cache" / profile_dir)])
                 for command in commands:
                     progress(f"[{args.subject}/{section_name}] Running {command[1]}", quiet=args.json_only)
                     if command[1] == "generate_notes.py" and (subject_output / "_condivise").is_dir():
@@ -105,6 +112,7 @@ def main():
                     continue
                 section_status = []
                 for command in commands:
+                    started_at = datetime.now()
                     result = subprocess.run(command, cwd=args.project_root, check=False, capture_output=True, text=True)
                     if result.stdout and not args.json_only:
                         print(result.stdout, end="")
@@ -112,7 +120,7 @@ def main():
                         print(result.stderr, end="")
                     diagnostic = (result.stdout + "\n" + result.stderr).casefold()
                     status = "completed" if result.returncode == 0 else ("needs_review" if any(marker in diagnostic for marker in ("needs_review", "truncated", "coverage", "validation")) else "failed")
-                    section_status.append({"command": command[1], "returncode": result.returncode, "status": status})
+                    section_status.append({"command": command[1], "returncode": result.returncode, "status": status, "duration_seconds": round((datetime.now() - started_at).total_seconds(), 2), "diagnostic_tail": (result.stderr or result.stdout or "").strip()[-1000:]})
                     progress(f"[{args.subject}/{section_name}] {command[1]} -> {status}", quiet=args.json_only)
                     if result.returncode != 0:
                         break
@@ -123,17 +131,31 @@ def main():
                 if any(entry.get("returncode") not in (None, 0) for entry in entries)
             ]
         if args.assemble:
-            progress(f"[{args.subject}] Assembling validated section finals", quiet=args.json_only)
-            try:
-                assembly_report = run_preparation(args.project_root, args.subject, section_name=None, extract=False, assemble=True)
-                report["assembly"] = assembly_report.get("assembly")
-            except Exception as exc:
-                # Preserve the detailed per-section/model report instead of converting
-                # a validly blocked incomplete assembly into a generic CLI error.
+            if args.section:
+                # A section-scoped run must remain useful on its own. The
+                # subject assembler requires every section, so defer it until
+                # an explicit all-sections run.
+                section_final = (args.project_root.resolve() / "output" / args.subject / args.section / "appunti_finali.md")
                 report["assembly"] = {
-                    "status": "needs_review",
-                    "error": f"{type(exc).__name__}: {exc}",
+                    "status": "section_only",
+                    "section": args.section,
+                    "output": str(section_final),
+                    "valid": section_final.is_file(),
+                    "message": "Subject assembly deferred; this run produces the selected section final only.",
                 }
+                progress(f"[{args.subject}/{args.section}] Section assembly complete; subject assembly deferred", quiet=args.json_only)
+            else:
+                progress(f"[{args.subject}] Assembling validated section finals", quiet=args.json_only)
+                try:
+                    assembly_report = run_preparation(args.project_root, args.subject, section_name=None, extract=False, assemble=True)
+                    report["assembly"] = assembly_report.get("assembly")
+                except Exception as exc:
+                    # Preserve the detailed per-section/model report instead of converting
+                    # a validly blocked incomplete assembly into a generic CLI error.
+                    report["assembly"] = {
+                        "status": "needs_review",
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
         output_root = (args.project_root.resolve() / "output" / args.subject).resolve()
         report_path = ensure_within(
             (args.report_path or (output_root / "pipeline_report.json")).resolve(),

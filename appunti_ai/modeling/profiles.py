@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,30 @@ from typing import Any
 
 PROFILE_SCHEMA_VERSION = 1
 DEFAULT_PROFILE_FILE = Path(__file__).resolve().parents[2] / "model_profiles.json"
+
+
+def _load_local_env() -> None:
+    """Load simple KEY=VALUE entries from the repository .env if present.
+
+    Existing process environment variables always win. Values are never
+    returned, logged, or written to state/audit files.
+    """
+    env_path = DEFAULT_PROFILE_FILE.parent / ".env"
+    if not env_path.is_file():
+        return
+    try:
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip("\"'")
+        if key and key not in os.environ:
+            os.environ[key] = value
 
 
 class ProfileError(ValueError):
@@ -83,6 +108,7 @@ def _validate_profile(name: str, value: Any) -> ModelProfile:
 
 
 def load_profiles(path: Path = DEFAULT_PROFILE_FILE) -> tuple[str, dict[str, ModelProfile]]:
+    _load_local_env()
     if not path.is_file():
         raise ProfileError(f"File profili non trovato: {path}")
     try:

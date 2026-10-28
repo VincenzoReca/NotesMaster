@@ -8,6 +8,7 @@ import re
 import time
 
 from appunti_ai.modeling import ModelRequest, create_client, load_profile
+from appunti_ai.modeling.profiles import ProfileError
 from appunti_ai.modeling.profiles import DEFAULT_PROFILE_FILE, ProfileError
 from appunti_ai.retrieval.lexical import RetrievalError, build_index, retrieve
 
@@ -18,10 +19,12 @@ DRAFT = ROOT / "output" / "draft"
 MODEL = "qwen3-vl:4b-instruct"
 MODEL_PROFILE = None
 PROFILE_FILE = DEFAULT_PROFILE_FILE
+# The profile is the source of truth for requests. These defaults are kept in
+# sync for legacy callers that import this module directly.
 MAX_CHARS = 3000
-NUM_CTX = 4096
-NUM_PREDICT = 2500
-PROMPT_VERSION = "generation-source-grounded-v3"
+NUM_CTX = 8192
+NUM_PREDICT = 6000
+PROMPT_VERSION = "generation-source-grounded-v4-reviewed"
 
 IMAGE_PATTERN = re.compile(
     r"!\[[^\]]*\]\(([^)]+)\)"
@@ -47,6 +50,17 @@ def has_useful_content(text):
     return len(text) >= 20 and bool(re.search(r"[\wÀ-ÿ]", text))
 
 
+def repair_mojibake(text: str) -> str:
+    """Repair common UTF-8 decoded as Windows-1252 artifacts when safe."""
+    if not isinstance(text, str) or not any(marker in text for marker in ("â", "Ã")):
+        return text
+    try:
+        candidate = text.encode("latin-1").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return text
+    return candidate if candidate.count("�") <= text.count("�") else text
+
+
 def is_valid_output(path):
     try:
         return path.is_file() and has_useful_content(path.read_text(encoding="utf-8"))
@@ -60,14 +74,26 @@ def atomic_write_text(path, content):
     temporary.replace(path)
 
 
-def generation_fingerprint(profile, shared_index):
+def generation_fingerprint(profile, shared_index, *, capacity_override=None, include_capacity=False):
+    # Resource ceilings control how much the provider may emit, but do not
+    # change the meaning of an already validated chunk.  Keep them out of the
+    # semantic fingerprint so increasing capacity only retries missing or
+    # failed tasks instead of regenerating the whole subject.
+    options = dict(profile.options)
+    if capacity_override:
+        options.update(capacity_override)
+    semantic_options = {
+        key: value
+        for key, value in options.items()
+        if include_capacity or key not in {"num_ctx", "num_predict", "timeout"}
+    }
     payload = {
         "prompt_version": PROMPT_VERSION,
         "profile": profile.name,
         "backend": profile.backend,
         "model": profile.model,
         "capabilities": sorted(profile.capabilities),
-        "options": profile.options,
+        "options": semantic_options,
         "shared_manifest_sha256": shared_index.get("manifest_sha256") if shared_index else None,
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -87,10 +113,23 @@ def get_role(text, filename):
         return match.group(1)
 
     name = filename.lower()
-    if "sbobin" in name or "transcript" in name:
+    suffix = Path(name).suffix
+    if suffix == ".docx":
+        return "personal_notes"
+    if suffix in {".md", ".markdown"}:
+        return "professor_slides"
+    if "sbobin" in name or "transcript" in name or "trascrizion" in name:
         return "primary_lecture"
     if "slide" in name or "presentazione" in name:
         return "professor_slides"
+    if suffix == ".pdf":
+        lowered = text.casefold()
+        image_count = len(IMAGE_PATTERN.findall(text))
+        index_terms = sum(lowered.count(term) for term in ("indice", "index", "table of contents", "contents"))
+        if index_terms >= 2 and image_count <= 2:
+            return "primary_lecture"
+        if image_count >= 1:
+            return "professor_slides"
     if "appunti" in name or "notes" in name:
         return "personal_notes"
     return "unclassified"
@@ -314,7 +353,44 @@ def process_task(role, filename, number, task, client=None, shared_context=""):
         )
     if response.done_reason == "length":
         raise GenerationValidationError("Risposta troncata (done_reason='length').")
-    return content
+    return repair_mojibake(content)
+
+
+def review_generated_chunk(source_text, generated_text, role, task, client):
+    """Run one bounded source-fidelity pass before checkpointing a chunk."""
+    prompt = (
+        "You are a strict source-fidelity editor. The SOURCE is the only factual authority. "
+        "Check the DRAFT claim by claim. Remove unsupported facts, external knowledge, "
+        "invented implications, and duplicated filler. Restore omitted source-supported "
+        "definitions, examples, qualifications, and image details. Keep uncertainty when "
+        "the source is uncertain. Keep Markdown image paths unchanged. Return only corrected "
+        "English study-note Markdown, with no review commentary.\n\n"
+        f"SOURCE ROLE: {role}\n\nSOURCE:\n{source_text}\n\nDRAFT:\n{generated_text}"
+    )
+    message = {"role": "user", "content": prompt}
+    if task.get("image") is not None:
+        message["images"] = [str(task["image"])]
+    response = client.generate(ModelRequest(
+        messages=[{"role": "system", "content": "Edit only against the supplied source. Never add outside information."}, message],
+        required_capabilities=frozenset({"text", "vision"} if task.get("image") is not None else {"text"}),
+    ))
+    content = response.content or ""
+    if response.done_reason == "length" or not has_useful_content(content):
+        raise GenerationValidationError("Chunk review returned an invalid or truncated response.")
+    return repair_mojibake(content)
+
+
+def generate_and_review_with_retry(role, filename, number, task, client, shared_context=""):
+    """Run generation plus review with one retry for transient provider timeouts."""
+    for attempt in (1, 2):
+        try:
+            generated = process_task(role, filename, number, task, client=client, shared_context=shared_context)
+            return review_generated_chunk(task["text"], generated, role, task, client)
+        except (TimeoutError, ConnectionError, ProfileError) as exc:
+            transient = any(token in str(exc).casefold() for token in ("timeout", "timed out", "tempor", "connection"))
+            if not transient or attempt == 2:
+                raise
+            print(f"    Transient provider error on attempt {attempt}; retrying once...", flush=True)
 
 
 def main():
@@ -387,11 +463,27 @@ def main():
 
     fingerprint = generation_fingerprint(profile, shared_index)
     metadata = state.get("_meta") if isinstance(state.get("_meta"), dict) else {}
-    if metadata.get("fingerprint") != fingerprint:
+    legacy_capacity_fingerprint = generation_fingerprint(
+        profile, shared_index,
+        capacity_override={"num_ctx": 4096, "num_predict": 2500},
+        include_capacity=True,
+    )
+    capacity_only_migration = (
+        metadata.get("fingerprint") == legacy_capacity_fingerprint
+        and metadata.get("prompt_version", PROMPT_VERSION) == PROMPT_VERSION
+    )
+    if metadata.get("fingerprint") != fingerprint and not capacity_only_migration:
         for entry in state.values():
             if isinstance(entry, dict) and isinstance(entry.get("completed"), list):
                 entry["completed"] = []
         print("Dipendenze cambiate: i completamenti precedenti saranno rivalidati.")
+    elif capacity_only_migration:
+        print("Aumento dei limiti di output rilevato: riuso i chunk validi e ritento solo quelli mancanti.")
+        for entry in state.values():
+            if isinstance(entry, dict) and isinstance(entry.get("tasks"), dict):
+                for task_record in entry["tasks"].values():
+                    if isinstance(task_record, dict):
+                        task_record["fingerprint"] = fingerprint
     state["_meta"] = {
         "fingerprint": fingerprint,
         "profile": profile.name,
@@ -418,10 +510,12 @@ def main():
             "role": role,
             "total": len(tasks),
             "completed": [],
+            "reviewed": [],
             "errors": {},
             "tasks": {},
         })
         state[source_name].setdefault("tasks", {})
+        state[source_name].setdefault("reviewed", [])
 
         state[source_name]["total"] = len(tasks)
 
@@ -441,6 +535,8 @@ def main():
             if reusable:
                 if key not in state[source_name]["completed"]:
                     state[source_name]["completed"].append(key)
+                if key not in state[source_name]["reviewed"]:
+                    state[source_name]["reviewed"].append(key)
                 continue
             if key in state[source_name]["completed"]:
                 state[source_name]["completed"].remove(key)
@@ -458,14 +554,11 @@ def main():
                         f"[Fonte condivisa: {item['source']} | blocco {item['chunk']}]\n{item['text']}"
                         for item in passages
                     )
-                result = process_task(
-                    role=role,
-                    filename=source_file.name,
-                    number=index,
-                    task=task,
-                    client=client,
-                    shared_context=shared_context,
+                print(f"    [{index}/{len(tasks)}] generation...", flush=True)
+                result = generate_and_review_with_retry(
+                    role, source_file.name, index, task, client, shared_context
                 )
+                print(f"    [{index}/{len(tasks)}] source review passed; saving...", flush=True)
 
                 metadata = [
                     f"<!-- source: {source_file.name} -->",
@@ -480,7 +573,9 @@ def main():
                 ]
                 if task["image"]:
                     try:
-                        image_reference = Path(task["image"]).resolve().relative_to(DRAFT.parent.resolve()).as_posix()
+                        # Keep image links relative to the section output root,
+                        # even when drafts are isolated by model profile.
+                        image_reference = Path(task["image"]).resolve().relative_to(EXTRACTED.parent.resolve()).as_posix()
                         metadata.extend([f"![Source figure]({image_reference})", ""])
                     except ValueError:
                         raise GenerationValidationError("Image path is outside the section output root.")
@@ -494,6 +589,7 @@ def main():
 
                 if key not in state[source_name]["completed"]:
                     state[source_name]["completed"].append(key)
+                state[source_name]["reviewed"].append(key)
 
                 state[source_name]["errors"].pop(key, None)
                 state[source_name]["tasks"][key] = {
@@ -533,6 +629,7 @@ def main():
             name: {
                 "total": entry.get("total"),
                 "completed": len(entry.get("completed", [])),
+                "reviewed": len(entry.get("reviewed", [])),
                 "failed": len(entry.get("errors", {})),
             }
             for name, entry in state.items()

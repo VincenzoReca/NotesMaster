@@ -8,10 +8,24 @@
       "capabilities": ["text", "vision"],
       "options": {
         "temperature": 0.2,
-        "num_ctx": 4096,
-        "num_predict": 2500
+        "num_ctx": 8192,
+        "num_predict": 6000
       },
       "remote": false
+    },
+    "azure_gpt6_luna": {
+      "backend": "azure_openai",
+      "model": "gpt-6-luna",
+      "capabilities": ["text", "vision"],
+      "options": {
+        "max_completion_tokens": 16384,
+        "timeout": 600
+      },
+      "remote": true,
+      "endpoint_env": "AZURE_URL_OPENAI",
+      "api_key_env": "AZURE_API_KEY",
+      "deployment": "gpt-6-luna",
+      "api_version": "2024-12-01-preview"
     }
   }
 }

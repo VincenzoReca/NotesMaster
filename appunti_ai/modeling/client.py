@@ -6,6 +6,7 @@ import base64
 import json
 import os
 import time
+from urllib.parse import urlsplit
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -133,6 +134,12 @@ class OpenAICompatibleClient:
                 timeout=timeout,
             ) as response:
                 data = json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            try:
+                detail = exc.read().decode("utf-8", errors="replace")[:1000]
+            except OSError:
+                detail = str(exc)
+            raise ProfileError(f"Errore provider remoto {self.profile.name!r}: HTTP {exc.code}: {detail}") from exc
         except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
             raise ProfileError(f"Errore provider remoto {self.profile.name!r}: {exc}") from exc
         choice = (data.get("choices") or [{}])[0]
@@ -155,7 +162,13 @@ class AzureOpenAIClient(OpenAICompatibleClient):
         super().__init__(profile, allow_remote)
         if not profile.deployment or not profile.api_version:
             raise ProfileError("Un profilo azure_openai richiede deployment e api_version.")
-        base = (profile.endpoint or os.environ.get(profile.endpoint_env or "")).rstrip("/")
+        configured_endpoint = profile.endpoint or os.environ.get(profile.endpoint_env or "")
+        parsed = urlsplit(configured_endpoint)
+        if not parsed.scheme or not parsed.netloc:
+            raise ProfileError("L'endpoint Azure OpenAI non è un URL valido.")
+        # Accept both the resource root and URLs copied from Azure's sample
+        # code (which may already contain /openai/... and a query string).
+        base = f"{parsed.scheme}://{parsed.netloc}"
         self.endpoint = f"{base}/openai/deployments/{profile.deployment}/chat/completions?api-version={profile.api_version}"
         self.api_key = os.environ.get(profile.api_key_env or "") if profile.api_key_env else None
 
@@ -171,6 +184,12 @@ class AzureOpenAIClient(OpenAICompatibleClient):
         try:
             with urlopen(Request(self.endpoint, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST"), timeout=timeout) as response:
                 data = json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            try:
+                detail = exc.read().decode("utf-8", errors="replace")[:1000]
+            except OSError:
+                detail = str(exc)
+            raise ProfileError(f"Azure OpenAI request failed for profile {self.profile.name!r}: HTTP {exc.code}: {detail}") from exc
         except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
             raise ProfileError(f"Azure OpenAI request failed for profile {self.profile.name!r}: {exc}") from exc
         choice = (data.get("choices") or [{}])[0]
