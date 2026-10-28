@@ -1,1 +1,1 @@
-"""Test automatici di AppuntiAI, privi di chiamate al modello in import."""
+"""NotesMaster tests; importing them never calls a model."""

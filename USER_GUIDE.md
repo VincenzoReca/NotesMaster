@@ -1,6 +1,6 @@
-# AppuntiAI User Guide
+# NotesMaster User Guide
 
-AppuntiAI turns organised course materials into source-faithful Markdown notes. Python owns discovery, extraction, model calls, validation, checkpoints, and deterministic assembly.
+NotesMaster turns organised course materials into source-faithful Markdown notes. Python owns discovery, extraction, model calls, validation, checkpoints, and deterministic assembly.
 
 ## 1. Requirements
 

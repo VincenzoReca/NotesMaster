@@ -1,16 +1,16 @@
-# AppuntiAI
+# NotesMaster
 
 For a practical setup and usage walkthrough, see [USER_GUIDE.md](USER_GUIDE.md).
 
-AppuntiAI is a local-first pipeline intended to transform university course materials into detailed, coherent, source-faithful study notes. It combines lecture transcripts, professor-provided slides, personal notes, and relevant visual material while keeping the provenance of information traceable.
+NotesMaster is a local-first pipeline intended to transform university course materials into detailed, coherent, source-faithful study notes. It combines lecture transcripts, professor-provided slides, personal notes, and relevant visual material while keeping the provenance of information traceable.
 
-> **Status and accuracy:** This document describes the agreed project goals and target architecture, not a claim that every feature is implemented. Initial extraction and generation scripts have existed, and a defect was previously observed in which some draft files contained metadata but little or no generated analysis. The current local code, installed model, and runtime configuration must be inspected before drawing conclusions about their present state.
+> **Status and accuracy:** NotesMaster currently provides scoped extraction, bounded generation, resumable checkpoints, local Ollama and explicitly approved Azure OpenAI profiles, deterministic image-link validation, and subject assembly. Semantic correctness and complete visual interpretation still require human review; `needs_review` is an explicit audit outcome.
 
 ## 1. Goals and constraints
 
 The project is intended to:
 
-- Run locally on Windows 11, using Python and Ollama, without Docker.
+  - Run locally on Windows 11, using Python and Ollama, without Docker.
 - Prefer free, locally executable software and models.
 - Support PDF, DOCX, Markdown, TXT, relevant images, audio, and video, subject to verified extractor capabilities.
 - Handle large collections of material, with an earlier target of roughly 100–300 pages in total, by processing bounded units rather than sending everything to the model at once.
@@ -48,7 +48,7 @@ Python controls deterministic workflow logic: directory discovery, path safety, 
 
 Ollama provides the initial local model runtime. The most recently reported model is `qwen3-vl:4b-instruct`; earlier work also referred to `qwen3-vl:4b` and `qwen3-vl:2b`. The target design is not tied to Ollama: every model-backed component will use an application-owned provider adapter selected by a named model profile. This allows a local runtime, an explicitly approved remote API, or another compatible backend to change without spreading provider-specific code through the pipeline.
 
-The proposed ergonomic selection is a named profile, for example `--model-profile locale_qwen`. A profile resolves to an adapter kind, model identifier, runtime/endpoint reference, capabilities, and non-secret defaults. The pipeline checks capabilities before it submits a task; it must never silently fall back from a local model to a remote API. The profile-file format, supported adapter set, and remote-provider approval mechanism remain open implementation decisions.
+Model selection uses named profiles such as `local_qwen` and `azure_gpt6_luna`. A profile resolves to an adapter kind, model identifier, runtime/endpoint reference, capabilities, and non-secret defaults. Remote execution requires the profile and `--allow-remote`; there is no silent provider fallback.
 
 ### Source-code layout
 
@@ -66,13 +66,19 @@ appunti_ai/
 
 The `scripts/` directory contains CLI entry points, while reusable business logic belongs in `appunti_ai/`. `orchestrate.py` is the primary user-facing launcher. `model_profiles.json` contains non-secret profile definitions; credentials remain outside version control. Tests remain under `tests/` and must not depend on real course material or an active model runtime.
 
-The current deterministic preparation command is:
+The primary interactive launcher is:
+
+```powershell
+python orchestrate.py
+```
+
+It asks for subject, section, and model/provider, then runs the complete pipeline. Advanced partial runs use the deterministic command:
 
 ```powershell
 python scripts/run_pipeline.py --subject Reti
 ```
 
-To prepare only one section, use `--section 02_NomeSezione`. The command writes a separate `pipeline_report.json` under the subject output directory. Each extraction scope also writes `audit/extraction_audit.json` with completed, failed, unsupported, and unsupported-media sources. Generation writes `audit/generation_audit.json`; section consolidation writes `audit/merge_audit.json` separately from `merge_state.json` and `appunti_finali.md`. `--assemble` requests deterministic assembly, which remains blocked unless every required section has a valid `appunti_finali.md`. Model generation and section consolidation can also receive explicit `--extracted-dir` and `--draft-dir` paths; their complete orchestration is still being implemented.
+To prepare only one section, use `--section 02_NomeSezione`. A section-scoped run produces its own `appunti_finali.md`; subject assembly is deferred until all sections are selected. Drafts and merge caches are isolated under provider/profile-specific directories, so switching models does not require deleting previous work. Each phase writes separate state, audit, and diagnostic information.
 
 For an isolated section, use for example:
 

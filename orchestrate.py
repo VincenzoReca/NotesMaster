@@ -1,4 +1,4 @@
-"""Interactive local launcher for AppuntiAI.
+"""Interactive local launcher for NotesMaster.
 
 This is a convenience layer over run_pipeline.py. It does not implement
 discovery, extraction, model calls, validation, or assembly itself.
@@ -84,7 +84,7 @@ def choose_section(project_root: Path, subject: str) -> str | None:
 def main() -> int:
     root = Path(__file__).resolve().parent
     project_root = root
-    print(f"AppuntiAI project: {project_root}")
+    print(f"NotesMaster project: {project_root}")
     subject_choice = choose_subject(project_root)
     if subject_choice is None:
         return 2

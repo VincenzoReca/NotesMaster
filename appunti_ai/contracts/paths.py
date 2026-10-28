@@ -248,7 +248,7 @@ def _format_issues(issues: Iterable[DiscoveryIssue]) -> list[str]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Verifica la struttura di input di AppuntiAI.")
+    parser = argparse.ArgumentParser(description="Verifica la struttura di input di NotesMaster.")
     parser.add_argument("--project-root", type=Path, default=Path(__file__).resolve().parent)
     parser.add_argument("--subject", help="Materia da verificare; se omesso elenca le candidate.")
     args = parser.parse_args()

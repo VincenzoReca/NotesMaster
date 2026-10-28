@@ -1,1 +1,1 @@
-"""Logica applicativa di AppuntiAI, separata dagli script di ingresso."""
+"""Application logic for NotesMaster, separate from CLI entry points."""

@@ -1,12 +1,12 @@
-# AGENTS.md — AppuntiAI Operational Specification
+# AGENTS.md — NotesMaster Operational Specification
 
-> **Purpose:** binding instructions for AI coding agents and maintainers working on AppuntiAI.
+> **Purpose:** binding instructions for AI coding agents and maintainers working on NotesMaster.
 >
 > **Primary rule:** do not invent requirements, technical facts, paths, APIs, or successful test results. Inspect what is verifiable. Ask before making an undefined choice that could materially change content, data, costs, dependencies, or architecture.
 
 ## 1. Objective and boundaries
 
-AppuntiAI is a local-first pipeline intended to transform university course materials into detailed, coherent, source-faithful study notes in Markdown. Target inputs are PDF, DOCX, Markdown, TXT, relevant images, audio, and video, subject to verified extraction capabilities. A local model runtime such as Ollama is the initial target, but the model boundary must permit explicitly configured remote providers as well.
+NotesMaster is a local-first pipeline intended to transform university course materials into detailed, coherent, source-faithful study notes in Markdown. Target inputs are PDF, DOCX, Markdown, TXT, relevant images, audio, and video, subject to verified extraction capabilities. A local model runtime such as Ollama is the initial target, with explicitly configured remote providers supported through adapters.
 
 The pipeline must:
 1. Keep subjects and sections rigorously isolated.
@@ -27,6 +27,20 @@ The pipeline must:
 **A model provider never owns pipeline control flow.** Providers receive bounded requests through an application-owned interface; they do not decide paths, source discovery, retries, state, validation, or fallback behaviour.
 
 This document describes requirements and the target architecture. It does not prove that any feature is implemented. The actual local code and runtime must be inspected before changes are made.
+
+## 2.1 Verified implementation notes
+
+The current implementation includes:
+
+- `orchestrate.py` as the simple user-facing launcher; it asks for subject, section, and model/provider, then runs the complete pipeline.
+- `local_qwen` (Ollama) and explicitly approved `azure_gpt6_luna` (Azure OpenAI) profiles through the provider boundary.
+- Profile-scoped draft and merge-cache directories, preserving previous model runs without manual cleanup.
+- Bounded generation and consolidation with finite retries and deterministic splitting when a provider returns `done_reason='length'`.
+- Per-chunk source-fidelity review, resumable state, atomic persistence, and detailed phase diagnostics.
+- Deterministic image-link normalization, duplicate-reference removal, image existence checks, and unresolved-reference audits.
+- Section-only execution that publishes the selected section final while deferring complete subject assembly until all sections are available.
+
+These safeguards improve reliability but do not prove semantic correctness or guarantee that every visual interpretation is accurate. Large documents may remain `needs_review` when a bounded global review cannot fit; human inspection remains required.
 
 ## 2. Known project context — verify before relying on it
 

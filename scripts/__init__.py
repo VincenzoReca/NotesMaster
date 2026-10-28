@@ -1,1 +1,1 @@
-"""Command-line entry points for AppuntiAI."""
+"""Command-line entry points for NotesMaster."""
